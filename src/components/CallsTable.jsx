@@ -28,6 +28,8 @@ export default function CallsTable({
   const [loading, setLoading] = useState(false);
   const [selected, setSelected] = useState(null);
   const [zipping, setZipping] = useState(false);
+  const [csving, setCsving] = useState(false);
+  const [deleting, setDeleting] = useState(null);
 
   useEffect(() => {
     if (features.includes("category")) api.meta().then(setMeta).catch(() => {});
@@ -52,29 +54,51 @@ export default function CallsTable({
 
   const upd = (k, v) => { setPage(1); setFilters((f) => ({ ...f, [k]: v })); };
 
-  const exportCsv = () => {
-    const rows = data.items;
-    if (!rows.length) return notify("Nothing to export on this page.", true);
-    const cols = ["call_id", "agent", "date", "category", "is_prior_auth", "auth_status", "status", "summary"];
-    const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
-    const csv = [cols.join(","), ...rows.map((r) => cols.map((c) => esc(r[c])).join(","))].join("\n");
-    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
-    const a = document.createElement("a");
-    a.href = url; a.download = `calls_page${data.page}.csv`; a.click();
-    URL.revokeObjectURL(url);
+  const activeParams = () => {
+    const params = { ...filters, ...fixed };
+    if (params.is_prior_auth === "") delete params.is_prior_auth;
+    return params;
+  };
+
+  const exportCsv = async () => {
+    if (data.total === 0) return notify("No calls to export.", true);
+    setCsving(true);
+    try {
+      await api.exportCsv(activeParams());
+      notify(`Exporting ${data.total} call(s) to CSV (full metadata + transcripts)…`);
+    } catch (e) {
+      notify(`Export failed: ${e.message}`, true);
+    } finally {
+      setCsving(false);
+    }
   };
 
   const downloadZip = async () => {
-    const params = { ...filters, ...fixed };
-    if (params.is_prior_auth === "") delete params.is_prior_auth;
     setZipping(true);
     try {
-      await api.downloadAllZip(params);
+      await api.downloadAllZip(activeParams());
       notify(`Downloading ${data.total} call(s) as ZIP…`);
     } catch (e) {
       notify(`Download failed: ${e.message}`, true);
     } finally {
       setZipping(false);
+    }
+  };
+
+  const del = async (e, callId) => {
+    e.stopPropagation();
+    if (!window.confirm(`Permanently delete call ${callId}?\n\nThis removes its transcript, analysis, flow, summary and the source audio from Azure. This cannot be undone.`)) return;
+    setDeleting(callId);
+    try {
+      await api.deleteCall(callId);
+      notify(`Deleted call ${callId}.`);
+      // Adjust page if we just removed the last row on it.
+      if (data.items.length === 1 && page > 1) setPage((p) => p - 1);
+      else load();
+    } catch (err) {
+      notify(`Delete failed: ${err.message}`, true);
+    } finally {
+      setDeleting(null);
     }
   };
 
@@ -128,7 +152,12 @@ export default function CallsTable({
               </div>
             )}
             <div className="right row">
-              {exportable && <button className="btn ghost" onClick={exportCsv}>Export CSV</button>}
+              {exportable && (
+                <button className="btn ghost" onClick={exportCsv} disabled={csving || data.total === 0}>
+                  {csving ? <span className="spin" /> : null}
+                  {csving ? "Exporting…" : "Export CSV"}
+                </button>
+              )}
               <button className="btn" onClick={downloadZip} disabled={zipping || data.total === 0}>
                 {zipping ? <span className="spin" /> : <Glyph name="download" />}
                 {zipping ? "Preparing…" : "Download ZIP"}
@@ -145,7 +174,7 @@ export default function CallsTable({
             <tr>
               <th>Call ID</th><th>Agent</th><th>Date</th><th>Category</th>
               {showAuthStatus ? <th>Auth-Status</th> : <th>Prior-Auth</th>}
-              <th>Status</th><th>Summary</th>
+              <th>Status</th><th>Summary</th><th></th>
             </tr>
           </thead>
           <tbody>
@@ -158,13 +187,23 @@ export default function CallsTable({
                 <td>{r.is_prior_auth ? <Badge kind="pa">{r.auth_status || "Yes"}</Badge> : <span className="muted">—</span>}</td>
                 <td><Badge kind={r.status}>{r.status}</Badge></td>
                 <td className="truncate">{r.summary || "—"}</td>
+                <td style={{ textAlign: "right" }}>
+                  <button
+                    className="icon-btn danger"
+                    title="Delete call"
+                    disabled={deleting === r.call_id}
+                    onClick={(e) => del(e, r.call_id)}
+                  >
+                    {deleting === r.call_id ? <span className="spin" /> : <Glyph name="trash" />}
+                  </button>
+                </td>
               </tr>
             ))}
             {!loading && data.items.length === 0 && (
-              <tr><td colSpan={7}><div className="empty">No calls match these filters.</div></td></tr>
+              <tr><td colSpan={8}><div className="empty">No calls match these filters.</div></td></tr>
             )}
             {loading && (
-              <tr><td colSpan={7}><Loading /></td></tr>
+              <tr><td colSpan={8}><Loading /></td></tr>
             )}
           </tbody>
         </table>

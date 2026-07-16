@@ -72,18 +72,26 @@ export const api = {
       method: "POST",
       headers: headers(),
     }).then(handle),
+  deleteCall: (id) =>
+    fetch(`${BASE}/api/results/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      headers: headers(),
+    }).then(handle),
 
-  // downloads (structured ZIP) — fetch with auth header, then save the blob
+  // downloads — fetch with the auth header, then save the blob client-side
   downloadCallZip: (id) =>
     fetch(`${BASE}/api/download/${encodeURIComponent(id)}`, { headers: headers() })
-      .then((r) => saveZip(r, `${id}.zip`)),
+      .then((r) => saveBlobResponse(r, `${id}.zip`)),
   downloadAllZip: (params) =>
     fetch(`${BASE}/api/download${qs(params)}`, { headers: headers() })
-      .then((r) => saveZip(r, "p3_calls.zip")),
+      .then((r) => saveBlobResponse(r, "p3_calls.zip")),
+  exportCsv: (params) =>
+    fetch(`${BASE}/api/export${qs(params)}`, { headers: headers() })
+      .then((r) => saveBlobResponse(r, "p3_calls.csv")),
 };
 
 // Turn a fetch Response into a client-side file download.
-async function saveZip(res, fallbackName) {
+async function saveBlobResponse(res, fallbackName) {
   if (!res.ok) {
     let detail = res.statusText;
     try {

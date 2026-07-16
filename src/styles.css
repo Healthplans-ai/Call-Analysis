@@ -192,6 +192,18 @@ button.btn:disabled { opacity: .45; cursor: not-allowed; box-shadow: none; filte
 button.btn.sm { padding: 6px 12px; font-size: 12px; }
 button.btn.sm svg { width: 14px; height: 14px; }
 
+/* Small icon-only button (e.g. per-row delete) */
+.icon-btn {
+  display: inline-grid; place-items: center; width: 32px; height: 32px;
+  border-radius: 9px; border: 1px solid var(--border-strong); background: var(--surface);
+  color: var(--muted); cursor: pointer; transition: all .14s; font-family: inherit;
+}
+.icon-btn svg { width: 16px; height: 16px; }
+.icon-btn:hover { background: var(--surface-2); color: var(--text); }
+.icon-btn.danger:hover { background: var(--danger-bg); color: var(--danger); border-color: #f1c2c4; }
+.icon-btn:disabled { opacity: .5; cursor: not-allowed; }
+.icon-btn .spin { border-color: var(--border-strong); border-top-color: var(--danger); }
+
 /* ---------- Forms ---------- */
 .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
 .field { display: flex; flex-direction: column; gap: 6px; }
