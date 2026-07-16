@@ -46,13 +46,13 @@ export const api = {
   // files: File[]; folder: optional prefix; paths: optional relative paths
   // (aligned with files) to preserve a nested folder hierarchy; stripRoot drops
   // the selected top-level wrapper folder from each path.
-  upload: (files, folder, paths, stripRoot) => {
+  upload: (files, folder, paths, stripRoot, signal) => {
     const fd = new FormData();
     for (const f of files) fd.append("files", f);
     if (folder) fd.append("folder", folder);
     if (paths && paths.length) fd.append("paths", JSON.stringify(paths));
     if (stripRoot) fd.append("strip_root", "true");
-    return fetch(`${BASE}/api/upload`, { method: "POST", headers: headers(), body: fd }).then(handle);
+    return fetch(`${BASE}/api/upload`, { method: "POST", headers: headers(), body: fd, signal }).then(handle);
   },
   trigger: (prefix) =>
     fetch(`${BASE}/api/trigger`, {

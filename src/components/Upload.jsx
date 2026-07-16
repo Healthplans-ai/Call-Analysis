@@ -32,6 +32,33 @@ async function entriesFromDrop(dt) {
   return [...(dt.files || [])].map((f) => ({ file: f, rel: f.webkitRelativePath || f.name }));
 }
 
+// ---- batched, concurrent upload ------------------------------------------
+// Big selections (hundreds of calls) are split into many small requests so no
+// single request runs long enough to hit a proxy/server timeout.
+const BATCH_MAX_FILES = 10;
+const BATCH_MAX_BYTES = 12 * 1024 * 1024; // ~12 MB per request
+const CONCURRENCY = 3;                     // simultaneous in-flight requests
+const MAX_RETRIES = 3;
+const BATCH_TIMEOUT_MS = 120000;
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function makeBatches(entries) {
+  const batches = [];
+  let cur = [], bytes = 0;
+  for (const e of entries) {
+    const sz = e.file.size || 0;
+    if (cur.length && (cur.length >= BATCH_MAX_FILES || bytes + sz > BATCH_MAX_BYTES)) {
+      batches.push(cur);
+      cur = []; bytes = 0;
+    }
+    cur.push(e);
+    bytes += sz;
+  }
+  if (cur.length) batches.push(cur);
+  return batches;
+}
+
 export default function Upload({ notify, onDone }) {
   // entries: [{ file, rel }]  — rel is the path relative to the dropped/selected root
   const [entries, setEntries] = useState([]);
@@ -40,6 +67,7 @@ export default function Upload({ notify, onDone }) {
   const [busy, setBusy] = useState(false);
   const [drag, setDrag] = useState(false);
   const [prefix, setPrefix] = useState("");
+  const [progress, setProgress] = useState(null); // {total, uploaded, failed, skipped, bytesTotal, bytesDone}
   const fileRef = useRef();
   const dirRef = useRef();
 
@@ -56,6 +84,7 @@ export default function Upload({ notify, onDone }) {
 
   const audio = entries.filter((e) => AUDIO_RE.test(e.rel));
   const hasFolders = audio.some((e) => e.rel.includes("/"));
+  const pct = progress ? Math.min(100, Math.round((progress.bytesDone / progress.bytesTotal) * 100)) : 0;
 
   const onDrop = async (e) => {
     e.preventDefault();
@@ -66,21 +95,78 @@ export default function Upload({ notify, onDone }) {
 
   const doUpload = async () => {
     if (!audio.length) return notify("No audio files selected (.mp3/.wav/.m4a/.ogg/.flac).", true);
+
+    const preserve = hasFolders;
+    const batches = makeBatches(audio);
+    const bytesTotal = audio.reduce((s, e) => s + (e.file.size || 0), 0) || 1;
+
+    let uploaded = 0, failed = 0, skipped = 0, bytesDone = 0;
+    const failedEntries = [];
+    const update = () =>
+      setProgress({ total: audio.length, uploaded, failed, skipped, bytesTotal, bytesDone });
+
     setBusy(true);
+    update();
+
+    // Send one batch with retry + per-request abort timeout.
+    const sendBatch = async (batch) => {
+      const files = batch.map((e) => e.file);
+      const paths = preserve ? batch.map((e) => e.rel) : undefined;
+      for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), BATCH_TIMEOUT_MS);
+        try {
+          return await api.upload(files, folder || undefined, paths, stripRoot, ctrl.signal);
+        } catch (err) {
+          if (attempt === MAX_RETRIES - 1) throw err;
+          await sleep(600 * (attempt + 1));
+        } finally {
+          clearTimeout(timer);
+        }
+      }
+    };
+
+    // Concurrency pool: CONCURRENCY workers pull batches off a shared cursor.
+    let cursor = 0;
+    const worker = async () => {
+      while (cursor < batches.length) {
+        const batch = batches[cursor++];
+        const batchBytes = batch.reduce((s, e) => s + (e.file.size || 0), 0);
+        try {
+          const res = await sendBatch(batch);
+          uploaded += res.count || 0;
+          skipped += res.skipped_count || 0;
+        } catch (_) {
+          failed += batch.length;
+          failedEntries.push(...batch);
+        } finally {
+          bytesDone += batchBytes;
+          update();
+        }
+      }
+    };
+
     try {
-      const files = audio.map((e) => e.file);
-      const paths = hasFolders ? audio.map((e) => e.rel) : undefined;
-      const res = await api.upload(files, folder || undefined, paths, stripRoot);
-      const skipped = res.skipped_count ? ` (${res.skipped_count} non-audio skipped)` : "";
-      notify(`Uploaded ${res.count} call(s) to Blob and queued for processing${skipped}.`);
-      setEntries([]);
-      if (fileRef.current) fileRef.current.value = "";
-      if (dirRef.current) dirRef.current.value = "";
+      await Promise.all(
+        Array.from({ length: Math.min(CONCURRENCY, batches.length) }, worker)
+      );
+      const parts = [`Uploaded ${uploaded} call(s)`];
+      if (skipped) parts.push(`${skipped} non-audio skipped`);
+      if (failed) parts.push(`${failed} failed — kept for retry`);
+      notify(parts.join(" · "), failed > 0);
+
+      if (failed) {
+        // Keep only the failed files so a second click retries just those.
+        setEntries(failedEntries);
+      } else {
+        setEntries([]);
+        if (fileRef.current) fileRef.current.value = "";
+        if (dirRef.current) dirRef.current.value = "";
+      }
       onDone?.();
-    } catch (e) {
-      notify(`Upload failed: ${e.message}`, true);
     } finally {
       setBusy(false);
+      setProgress(null);
     }
   };
 
@@ -125,10 +211,10 @@ export default function Upload({ notify, onDone }) {
             "Drag & drop audio files or a folder here"
           )}
           <div className="row" style={{ justifyContent: "center", marginTop: 12 }}>
-            <button className="btn ghost sm" onClick={() => fileRef.current?.click()} type="button">
+            <button className="btn ghost sm" onClick={() => fileRef.current?.click()} type="button" disabled={busy}>
               <Glyph name="upload" /> Choose files
             </button>
-            <button className="btn ghost sm" onClick={() => dirRef.current?.click()} type="button">
+            <button className="btn ghost sm" onClick={() => dirRef.current?.click()} type="button" disabled={busy}>
               <Glyph name="results" /> Choose folder
             </button>
           </div>
@@ -172,9 +258,25 @@ export default function Upload({ notify, onDone }) {
           </label>
         )}
 
+        {progress && (
+          <div style={{ marginTop: 16 }}>
+            <div className="row" style={{ justifyContent: "space-between", fontSize: 12.5, marginBottom: 6 }}>
+              <span className="muted">
+                {progress.uploaded + progress.failed} / {progress.total} processed
+                {progress.failed ? <span style={{ color: "var(--danger)" }}> · {progress.failed} failed</span> : null}
+                {progress.skipped ? <span className="muted"> · {progress.skipped} skipped</span> : null}
+              </span>
+              <span style={{ fontWeight: 700 }}>{pct}%</span>
+            </div>
+            <div className="progress-track">
+              <div className="seg done" style={{ width: `${pct}%` }} />
+            </div>
+          </div>
+        )}
+
         <button className="btn" style={{ marginTop: 14 }} disabled={busy} onClick={doUpload}>
           {busy ? <span className="spin" /> : <Glyph name="upload" />}
-          {busy ? "Uploading…" : `Upload & process${audio.length ? ` (${audio.length})` : ""}`}
+          {busy ? `Uploading… ${pct}%` : `Upload & process${audio.length ? ` (${audio.length})` : ""}`}
         </button>
       </div>
 
